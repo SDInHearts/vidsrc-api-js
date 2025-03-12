@@ -1,6 +1,26 @@
-import fetch from 'node-fetch';
+export default async function handler(req, res) {
+  if (req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method Not Allowed' });
+  }
 
-export async function getEmbedSu(tmdb_id, s, e) {
+  const { tmdbId } = req.query;
+  const season = req.query.s;
+  const episode = req.query.e;
+
+  if (!tmdbId) {
+    return res.status(400).json({ error: 'Missing TMDB ID' });
+  }
+
+  try {
+    const response = await getEmbedSu(tmdbId, season, episode);
+    res.status(200).json(response);
+  } catch (error) {
+    console.error('Error fetching EmbedSu:', error);
+    res.status(500).json({ error: 'Failed to fetch data' });
+  }
+}
+
+async function getEmbedSu(tmdb_id, s, e) {
   const DOMAIN = "https://embed.su";
   const headers = {
     'User-Agent': "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -14,40 +34,33 @@ export async function getEmbedSu(tmdb_id, s, e) {
     const textSearch = await htmlSearch.text();
 
     const hashEncodeMatch = textSearch.match(/JSON\.parse\(atob\(\`([^\`]+)/i);
-    const hashEncode = hashEncodeMatch ? hashEncodeMatch[1] : "";
+    if (!hashEncodeMatch) return { sources: [], subtitles: [] };
 
-    if (!hashEncode) return;
-
+    const hashEncode = hashEncodeMatch[1];
     const hashDecode = JSON.parse(await stringAtob(hashEncode));
     const mEncrypt = hashDecode.hash;
-    if (!mEncrypt) return;
+    if (!mEncrypt) return { sources: [], subtitles: [] };
 
     const firstDecode = (await stringAtob(mEncrypt)).split(".").map(item => item.split("").reverse().join(""));
     const secondDecode = JSON.parse(await stringAtob(firstDecode.join("").split("").reverse().join("")));
 
-    if (!secondDecode || secondDecode.length === 0) return;
+    if (!secondDecode || secondDecode.length === 0) return { sources: [], subtitles: [] };
 
     const sources = [];
     const subtitles = [];
 
     for (const item of secondDecode) {
       const urlDirect = `${DOMAIN}/api/e/${item.hash}`;
-      const dataDirect = await requestGet(urlDirect, {
-        "Referer": DOMAIN,
-        "User-Agent": headers['User-Agent'],
-        "Origin": DOMAIN
-      });
-
+      const dataDirect = await requestGet(urlDirect, headers);
       if (!dataDirect.source) continue;
 
-      const tracks = dataDirect.subtitles.map(sub => ({
+      const tracks = (dataDirect.subtitles || []).map(sub => ({
         url: sub.file,
         lang: sub.label.split('-')[0].trim()
       })).filter(track => track.lang);
 
       const requestDirectSize = await fetch(dataDirect.source, { headers, method: "GET" });
       const parseRequest = await requestDirectSize.text();
-
       const patternSize = parseRequest.split('\n').filter(item => item.includes('/proxy/'));
 
       const directQuality = patternSize.map(patternItem => {
@@ -62,59 +75,39 @@ export async function getEmbedSu(tmdb_id, s, e) {
       sources.push({
         provider: "EmbedSu",
         files: directQuality,
-        headers: {
-          "Referer": DOMAIN,
-          "User-Agent": headers['User-Agent'],
-          "Origin": DOMAIN
-        }
+        headers
       });
 
       subtitles.push(...tracks);
     }
 
-    return {
-      sources,
-      subtitles
-    };
-  } catch (e) {
-    return { provider: "EmbedSu", sources: [], subtitles: [] };
+    return { sources, subtitles };
+  } catch (error) {
+    console.error("EmbedSu Error:", error);
+    return { sources: [], subtitles: [] };
   }
 }
 
 function getSizeQuality(url) {
   const parts = url.split('/');
   const base64Part = parts[parts.length - 2];
-  const decodedPart = atob(base64Part);
-  const sizeQuality = Number(decodedPart) || 1080;
-  return sizeQuality;
+  try {
+    const decodedPart = atob(base64Part);
+    return Number(decodedPart) || 1080;
+  } catch {
+    return 1080;
+  }
 }
 
 async function stringAtob(input) {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-  let str = input.replace(/=+$/, '');
-  let output = '';
-
-  if (str.length % 4 === 1) {
-    throw new Error("'atob' failed: The string to be decoded is not correctly encoded.");
-  }
-
-  for (let bc = 0, bs = 0, buffer, i = 0; buffer = str.charAt(i++); ~buffer && (bs = bc % 4 ? bs * 64 + buffer : buffer, bc++ % 4) ? output += String.fromCharCode(255 & bs >> (-2 * bc & 6)) : 0) {
-    buffer = chars.indexOf(buffer);
-  }
-
-  return output;
+  return Buffer.from(input, 'base64').toString('utf-8');
 }
 
 async function requestGet(url, headers = {}) {
   try {
     const response = await fetch(url, { method: 'GET', headers });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    return await response.json();
-  } catch (error) {
+    return response.ok ? await response.json() : "";
+  } catch {
     return "";
   }
 }
